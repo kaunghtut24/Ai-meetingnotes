@@ -49,7 +49,7 @@ class AssemblyAIService {
 
     async getTemporaryToken() {
         // Use Flask backend to securely get AssemblyAI token
-        const response = await fetch('/api/assemblyai/token', {
+        const response = await fetch('/api/assemblyai-token', {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${this.app.sessionToken}`,
@@ -202,7 +202,7 @@ class GeminiService {
                     };
                 }
 
-                const response = await fetch('/api/gemini/generate', {
+                const response = await fetch('/api/gemini-generate', {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${this.sessionToken}`,

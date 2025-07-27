@@ -59,9 +59,6 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         """Proxy requests to Gemini API"""
         try:
-            config = api_keys_storage.get(self.user_id, {})
-            
-            gemini_key = config.get('gemini_key')
             if not gemini_key:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')

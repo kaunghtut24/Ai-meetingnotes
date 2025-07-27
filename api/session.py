@@ -1,63 +1,85 @@
-"""
-Vercel Serverless Function: Session Management
-Creates and manages user sessions for the AI Meeting Transcription Assistant
-"""
-
 import os
 import json
-import hashlib
-import secrets
-from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler
 import jwt
+from http.server import BaseHTTPRequestHandler
 
 # Configuration
-SECRET_KEY = os.environ.get('SECRET_KEY', secrets.token_hex(32))
-JWT_EXPIRATION_HOURS = int(os.environ.get('JWT_EXPIRATION_HOURS', '24'))
+SECRET_KEY = os.environ.get('SECRET_KEY', 'default-secret-key')
 
-def generate_session_token(user_id):
-    """Generate a JWT session token"""
-    payload = {
-        'user_id': user_id,
-        'exp': datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
-        'iat': datetime.utcnow()
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+def verify_token(token):
+    """Verify JWT token"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        return payload.get('user_id')
+    except jwt.InvalidTokenError:
+        return None
 
 class handler(BaseHTTPRequestHandler):
+    def _send_json_response(self, status, data):
+        """Helper to send JSON with proper headers"""
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
+    def _get_user_id(self):
+        """Extract and verify JWT token"""
+        auth_header = self.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return None
+        token = auth_header.split(' ')[1]
+        return verify_token(token)
+
     def do_POST(self):
-        """Create a new user session"""
+        """Save user configuration"""
         try:
-            # Generate a simple user ID for demo purposes
-            client_ip = self.headers.get('x-forwarded-for', '127.0.0.1')
-            user_id = hashlib.sha256(f"{client_ip}_{datetime.utcnow()}".encode()).hexdigest()[:16]
-            token = generate_session_token(user_id)
-            
+            user_id = self._get_user_id()
+            if not user_id:
+                self._send_json_response(401, {'error': 'Invalid or missing token'})
+                return
+
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            config_data = json.loads(post_data.decode('utf-8'))
+
+            # (In a real app, save config_data to database)
+
             response_data = {
-                'token': token,
-                'user_id': user_id,
-                'expires_in': JWT_EXPIRATION_HOURS * 3600
+                'success': True,
+                'message': 'Configuration saved successfully',
+                'user_id': user_id
             }
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-            self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-            self.end_headers()
-            
-            self.wfile.write(json.dumps(response_data).encode())
-            
+            self._send_json_response(200, response_data)
+
         except Exception as e:
-            self.send_response(500)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'error': str(e)}).encode())
-    
+            self._send_json_response(500, {'error': str(e)})
+
+    def do_GET(self):
+        """Load user configuration"""
+        try:
+            user_id = self._get_user_id()
+            if not user_id:
+                self._send_json_response(401, {'error': 'Invalid or missing token'})
+                return
+
+            # (In a real app, load config from database)
+            response_data = {
+                'assemblyai_api_key': '',
+                'gemini_api_key': '',
+                'user_id': user_id
+            }
+            self._send_json_response(200, response_data)
+
+        except Exception as e:
+            self._send_json_response(500, {'error': str(e)})
+
     def do_OPTIONS(self):
         """Handle CORS preflight"""
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
         self.end_headers()

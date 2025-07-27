@@ -1,112 +1,55 @@
-// AssemblyAI Real-time Transcription Service using SocketIO
+// AssemblyAI Real-time Transcription Service
 class AssemblyAIService {
     constructor(apiKey, app) {
         this.apiKey = apiKey;
         this.app = app;
-        this.socketio = null;
+        this.socket = null;
         this.isConnected = false;
         this.audioContext = null;
         this.mediaStream = null;
         this.processor = null;
         this.sampleRate = 16000;
-        this.sessionId = null;
     }
 
     async connect() {
         try {
-            // Validate API key first
-            const validation = await this.validateApiKey();
-            
-            if (validation.valid) {
-                console.log('AssemblyAI API key validated for Streaming v3');
-                
-                // Initialize SocketIO connection
-                this.socketio = io();
-                this.sessionId = `session_${Date.now()}`;
-                
-                // Set up SocketIO event listeners
-                this.setupSocketIOListeners();
-                
-                // Join session room
-                this.socketio.emit('join_session', { session_id: this.sessionId });
-                
-                // Start AssemblyAI streaming
-                this.socketio.emit('start_assemblyai_stream', {
-                    session_token: this.app.sessionToken,
-                    session_id: this.sessionId
-                });
-                
-                this.app.showToast('Connecting to AssemblyAI...', 'info');
-            }
+            // Get temporary token for WebSocket connection
+            const token = await this.getTemporaryToken();
+
+            // Connect to AssemblyAI WebSocket
+            this.socket = new WebSocket(`${this.app.config.assemblyAI.websocketUrl}?token=${token}`);
+
+            this.socket.onopen = () => {
+                this.isConnected = true;
+                console.log('AssemblyAI WebSocket connected');
+                this.app.showToast('AssemblyAI connected', 'success');
+            };
+
+            this.socket.onmessage = (event) => {
+                this.handleMessage(JSON.parse(event.data));
+            };
+
+            this.socket.onerror = (error) => {
+                console.error('AssemblyAI WebSocket error:', error);
+                this.app.showToast('AssemblyAI connection error', 'error');
+                this.fallbackToWebSpeech();
+            };
+
+            this.socket.onclose = () => {
+                this.isConnected = false;
+                console.log('AssemblyAI WebSocket disconnected');
+            };
 
         } catch (error) {
             console.error('Failed to connect to AssemblyAI:', error);
-            this.app.showToast('AssemblyAI connection failed - using Web Speech fallback', 'error');
+            this.app.showToast('AssemblyAI connection failed', 'error');
             this.fallbackToWebSpeech();
         }
     }
-    
-    setupSocketIOListeners() {
-        this.socketio.on('assemblyai_connected', (data) => {
-            this.isConnected = true;
-            console.log('AssemblyAI connected via SocketIO');
-            this.app.showToast('AssemblyAI connected successfully!', 'success');
-        });
-        
-        this.socketio.on('assemblyai_transcript', (data) => {
-            if (data.is_final) {
-                this.app.addTranscriptEntry(data.transcript, data.confidence, false);
-            } else {
-                this.app.updateInterimResult(data.transcript);
-            }
-        });
-        
-        this.socketio.on('assemblyai_error', (data) => {
-            console.error('AssemblyAI error:', data.error);
-            this.app.showToast(`AssemblyAI error: ${data.error}`, 'error');
-            this.fallbackToWebSpeech();
-        });
-        
-        this.socketio.on('assemblyai_disconnected', (data) => {
-            this.isConnected = false;
-            console.log('AssemblyAI disconnected');
-            this.app.showToast('AssemblyAI disconnected', 'warning');
-        });
-        
-        this.socketio.on('assemblyai_stream_started', (data) => {
-            console.log('AssemblyAI stream started');
-        });
-        
-        this.socketio.on('assemblyai_stream_stopped', (data) => {
-            console.log('AssemblyAI stream stopped');
-        });
-    }
 
-    async waitForConnection(timeout = 5000) {
-        return new Promise((resolve, reject) => {
-            if (this.isConnected) {
-                resolve();
-                return;
-            }
-
-            const startTime = Date.now();
-            const checkConnection = () => {
-                if (this.isConnected) {
-                    resolve();
-                } else if (Date.now() - startTime > timeout) {
-                    reject(new Error('Connection timeout'));
-                } else {
-                    setTimeout(checkConnection, 100);
-                }
-            };
-
-            checkConnection();
-        });
-    }
-
-    async validateApiKey() {
-        // Use Flask backend to validate AssemblyAI API key
-        const response = await fetch('/api/assemblyai/validate', {
+    async getTemporaryToken() {
+        // Use Flask backend to securely get AssemblyAI token
+        const response = await fetch('/api/assemblyai/token', {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${this.app.sessionToken}`,
@@ -116,11 +59,11 @@ class AssemblyAIService {
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.error || `Failed to validate API key: ${response.status}`);
+            throw new Error(error.error || `Failed to get token: ${response.status}`);
         }
 
         const data = await response.json();
-        return data;
+        return data.token;
     }
 
     async startRecording() {
@@ -135,14 +78,10 @@ class AssemblyAIService {
                 }
             });
 
-            // Create audio context (let it use the default sample rate to avoid conflicts)
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-
-            // Update our sample rate to match the AudioContext
-            this.sampleRate = this.audioContext.sampleRate;
-
-            // Log the actual sample rate for debugging
-            console.log('AudioContext sample rate:', this.audioContext.sampleRate);
+            // Create audio context
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: this.sampleRate
+            });
 
             const source = this.audioContext.createMediaStreamSource(this.mediaStream);
 
@@ -151,39 +90,16 @@ class AssemblyAIService {
             this.processor = new AudioWorkletNode(this.audioContext, 'audio-processor');
 
             this.processor.port.onmessage = (event) => {
-                if (event.data.type === 'audioData' && this.isConnected && this.socketio) {
-                    // Convert audio data to base64 for SocketIO transmission
-                    const audioArray = new Uint8Array(event.data.data);
-                    const base64Audio = btoa(String.fromCharCode.apply(null, audioArray));
-
-                    console.log(`Sending audio chunk: ${event.data.duration.toFixed(1)}ms, ${audioArray.length} bytes (${event.data.originalSampleRate}Hz → ${event.data.targetSampleRate}Hz)`);
-
-                    this.socketio.emit('send_audio_data', {
-                        audio_data: base64Audio
-                    });
+                if (this.isConnected && this.socket.readyState === WebSocket.OPEN) {
+                    this.socket.send(event.data);
                 }
             };
 
-            // Send sample rate to the audio processor
-            this.processor.port.postMessage({
-                type: 'setSampleRate',
-                sampleRate: this.audioContext.sampleRate
-            });
-
-            // Connect to AssemblyAI via SocketIO first
-            await this.connect();
-
-            // Wait for connection to be established before starting audio flow
-            try {
-                await this.waitForConnection();
-                console.log('AssemblyAI connection established, starting audio flow');
-            } catch (error) {
-                console.error('Failed to establish AssemblyAI connection:', error);
-                throw error;
-            }
-
             source.connect(this.processor);
             this.processor.connect(this.audioContext.destination);
+
+            // Connect to AssemblyAI
+            await this.connect();
 
         } catch (error) {
             console.error('Failed to start AssemblyAI recording:', error);
@@ -195,69 +111,16 @@ class AssemblyAIService {
     createAudioWorkletProcessor() {
         const processorCode = `
             class AudioProcessor extends AudioWorkletProcessor {
-                constructor() {
-                    super();
-                    this.bufferSize = 0;
-                    this.buffer = [];
-                    this.targetBufferDuration = 100; // 100ms target duration
-                    this.sampleRate = 48000; // Will be updated from main thread
-                    this.samplesPerBuffer = Math.floor(this.sampleRate * this.targetBufferDuration / 1000);
-
-                    // Listen for sample rate updates from main thread
-                    this.port.onmessage = (event) => {
-                        if (event.data.type === 'setSampleRate') {
-                            this.sampleRate = event.data.sampleRate;
-                            this.samplesPerBuffer = Math.floor(this.sampleRate * this.targetBufferDuration / 1000);
-                            console.log('AudioProcessor: Sample rate set to', this.sampleRate, 'samples per buffer:', this.samplesPerBuffer);
-                        }
-                    };
-                }
-
                 process(inputs, outputs, parameters) {
                     const input = inputs[0];
                     if (input.length > 0) {
                         const audioData = input[0];
-
-                        // Add samples to buffer
+                        // Convert float32 to int16
+                        const int16Array = new Int16Array(audioData.length);
                         for (let i = 0; i < audioData.length; i++) {
-                            this.buffer.push(audioData[i]);
+                            int16Array[i] = Math.max(-32768, Math.min(32767, audioData[i] * 32768));
                         }
-
-                        // Send buffer when we have enough samples (target duration reached)
-                        if (this.buffer.length >= this.samplesPerBuffer) {
-                            // Downsample to 16kHz if needed (AssemblyAI expects 16kHz)
-                            const targetSampleRate = 16000;
-                            let processedBuffer = this.buffer;
-
-                            if (this.sampleRate !== targetSampleRate) {
-                                // Simple downsampling by taking every nth sample
-                                const downsampleRatio = this.sampleRate / targetSampleRate;
-                                const downsampledLength = Math.floor(this.buffer.length / downsampleRatio);
-                                processedBuffer = new Array(downsampledLength);
-
-                                for (let i = 0; i < downsampledLength; i++) {
-                                    const sourceIndex = Math.floor(i * downsampleRatio);
-                                    processedBuffer[i] = this.buffer[sourceIndex];
-                                }
-                            }
-
-                            // Convert float32 to int16
-                            const int16Array = new Int16Array(processedBuffer.length);
-                            for (let i = 0; i < processedBuffer.length; i++) {
-                                int16Array[i] = Math.max(-32768, Math.min(32767, processedBuffer[i] * 32768));
-                            }
-
-                            this.port.postMessage({
-                                type: 'audioData',
-                                data: int16Array.buffer,
-                                duration: (processedBuffer.length / targetSampleRate) * 1000, // duration in ms at 16kHz
-                                originalSampleRate: this.sampleRate,
-                                targetSampleRate: targetSampleRate
-                            });
-
-                            // Clear buffer
-                            this.buffer = [];
-                        }
+                        this.port.postMessage(int16Array.buffer);
                     }
                     return true;
                 }
@@ -293,9 +156,9 @@ class AssemblyAIService {
             this.mediaStream = null;
         }
 
-        // Stop AssemblyAI stream via SocketIO
-        if (this.socketio && this.isConnected) {
-            this.socketio.emit('stop_assemblyai_stream');
+        if (this.socket) {
+            this.socket.close();
+            this.socket = null;
         }
 
         this.isConnected = false;
@@ -464,7 +327,7 @@ class MeetingTranscriptionApp {
         this.config = {
             assemblyAI: {
                 apiKey: null,
-                websocketUrl: 'wss://api.assemblyai.com/v2/stream',
+                websocketUrl: 'wss://api.assemblyai.com/v2/realtime/ws',
                 enabled: false
             },
             gemini: {
@@ -495,7 +358,7 @@ class MeetingTranscriptionApp {
     async init() {
         this.initElements();
         await this.initSession();
-        await this.initConfiguration();
+        this.initConfiguration();
         await this.initServices();
         this.initSpeechRecognition();
         this.bindEvents();
@@ -532,11 +395,8 @@ class MeetingTranscriptionApp {
         }
     }
 
-    async initConfiguration() {
-        // Load configuration from backend first
-        await this.loadConfigurationFromBackend();
-        
-        // Load any additional configuration from localStorage
+    initConfiguration() {
+        // Load configuration from localStorage
         const savedConfig = localStorage.getItem('meetingApp_config');
         if (savedConfig) {
             try {
@@ -564,39 +424,6 @@ class MeetingTranscriptionApp {
         });
     }
 
-    async loadConfigurationFromBackend() {
-        if (!this.sessionToken) return;
-        
-        try {
-            const response = await fetch('/api/config', {
-                method: 'GET',
-                headers: {
-                    'Authorization': `Bearer ${this.sessionToken}`,
-                    'Content-Type': 'application/json'
-                }
-            });
-
-            if (response.ok) {
-                const backendConfig = await response.json();
-                
-                // Update config based on backend response
-                if (backendConfig.assemblyai_configured) {
-                    this.config.assemblyAI.apiKey = 'configured'; // Don't store actual key in frontend
-                    this.config.assemblyAI.enabled = true;
-                }
-                
-                if (backendConfig.gemini_configured) {
-                    this.config.gemini.apiKey = 'configured'; // Don't store actual key in frontend
-                    this.config.gemini.enabled = true;
-                }
-                
-                console.log('Configuration loaded from backend:', backendConfig);
-            }
-        } catch (error) {
-            console.error('Failed to load configuration from backend:', error);
-        }
-    }
-
     getAPIKey(envVarName) {
         // In a real environment, this would access environment variables
         // For browser environment, we'll use a different approach
@@ -612,23 +439,6 @@ class MeetingTranscriptionApp {
         // Initialize Gemini service if enabled and session token is available
         if (this.config.gemini.enabled && this.sessionToken) {
             this.geminiService = new GeminiService(this.sessionToken, this.config.gemini);
-        }
-
-        // Set default transcription service based on availability and browser support
-        if (this.config.assemblyAI.enabled && this.assemblyAIService) {
-            this.activeTranscriptionService = 'assemblyai';
-        } else if (this.webSpeechSupported) {
-            this.activeTranscriptionService = 'webspeech';
-        } else {
-            this.activeTranscriptionService = 'none';
-            console.warn('No transcription service available. Please configure AssemblyAI or use a supported browser.');
-        }
-
-        // Set default AI service
-        if (this.config.gemini.enabled && this.geminiService) {
-            this.activeAIService = 'gemini';
-        } else {
-            this.activeAIService = 'simulation';
         }
 
         // Update service status indicators if they exist
@@ -709,17 +519,14 @@ class MeetingTranscriptionApp {
     }
 
     initSpeechRecognition() {
-        // Check for Web Speech API support
-        this.webSpeechSupported = 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
-
-        if (this.webSpeechSupported) {
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             this.recognition = new SpeechRecognition();
-
+            
             this.recognition.continuous = true;
             this.recognition.interimResults = true;
             this.recognition.lang = this.languageSelect.value;
-
+            
             this.recognition.onstart = () => {
                 this.updateStatus('Recording', 'recording');
                 this.audioVisualizer.classList.add('active');
@@ -739,14 +546,9 @@ class MeetingTranscriptionApp {
                     this.recognition.start(); // Restart for continuous recognition
                 }
             };
-
-            console.log('Web Speech API initialized successfully');
         } else {
-            console.log('Web Speech API not supported, will use AssemblyAI or show configuration prompt');
-            this.recognition = null;
-
-            // Show informative message about browser compatibility
-            this.showBrowserCompatibilityInfo();
+            this.showToast('Speech recognition not supported in this browser', 'error');
+            this.recordButton.disabled = true;
         }
     }
 
@@ -831,11 +633,7 @@ class MeetingTranscriptionApp {
             } else {
                 // Fallback to Web Speech API
                 if (!this.recognition) {
-                    if (!this.webSpeechSupported) {
-                        this.showToast('Please configure AssemblyAI API key in settings for transcription', 'error');
-                    } else {
-                        this.showToast('No transcription service available', 'error');
-                    }
+                    this.showToast('No transcription service available', 'error');
                     this.isRecording = false;
                     return;
                 }
@@ -854,13 +652,9 @@ class MeetingTranscriptionApp {
 
             // Try fallback if AssemblyAI failed
             if (this.activeTranscriptionService === 'assemblyai') {
-                if (this.webSpeechSupported) {
-                    this.activeTranscriptionService = 'webspeech';
-                    this.showToast('Switching to Web Speech API', 'warning');
-                    setTimeout(() => this.startRecording(), 1000);
-                } else {
-                    this.showToast('AssemblyAI failed and Web Speech API not supported. Please check your AssemblyAI configuration.', 'error');
-                }
+                this.activeTranscriptionService = 'webspeech';
+                this.showToast('Switching to Web Speech API', 'warning');
+                setTimeout(() => this.startRecording(), 1000);
             }
         }
     }
@@ -1623,37 +1417,12 @@ class MeetingTranscriptionApp {
         const toast = document.createElement('div');
         toast.className = `toast toast--${type}`;
         toast.textContent = message;
-
+        
         this.toastContainer.appendChild(toast);
-
+        
         setTimeout(() => {
             toast.remove();
         }, 4000);
-    }
-
-    showBrowserCompatibilityInfo() {
-        // Show a helpful message about browser compatibility
-        const browserName = this.getBrowserName();
-        const message = `Web Speech API not supported in ${browserName}. Please configure AssemblyAI for transcription or use Chrome/Edge for Web Speech API support.`;
-
-        this.showToast(message, 'warning');
-
-        // Don't disable the record button - let users try with AssemblyAI
-        console.log('Browser compatibility info:', {
-            browser: browserName,
-            webSpeechSupported: this.webSpeechSupported,
-            assemblyAIAvailable: !!this.assemblyAIService
-        });
-    }
-
-    getBrowserName() {
-        const userAgent = navigator.userAgent;
-        if (userAgent.includes('Firefox')) return 'Firefox';
-        if (userAgent.includes('Chrome')) return 'Chrome';
-        if (userAgent.includes('Safari')) return 'Safari';
-        if (userAgent.includes('Edge')) return 'Edge';
-        if (userAgent.includes('Opera')) return 'Opera';
-        return 'this browser';
     }
 }
 

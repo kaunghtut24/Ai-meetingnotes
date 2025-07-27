@@ -55,9 +55,5 @@
         }
       ]
     }
-  ],
-  "env": {
-    "SECRET_KEY": "@secret_key",
-    "JWT_EXPIRATION_HOURS": "24"
-  }
+  ]
 }

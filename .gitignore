@@ -230,3 +230,5 @@ htmlcov/
 
 # Documentation builds
 docs/_build/
+
+.vercel
